@@ -6,4 +6,3 @@
 - Numpy: 1.26.4
 - Cloudpickle: 3.1.0
 - Gymnasium: 1.2.0
-- OpenAI Gym: 0.26.2

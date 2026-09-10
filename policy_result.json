@@ -1,0 +1,26 @@
+{
+  "upstream_commit": "7cfb4dd6055e74b5caa4ed4d6777492209946e26",
+  "checks": "passed",
+  "cases": [
+    {
+      "mean": 0.0,
+      "latent": -0.018113523721694946,
+      "action": -0.018111543729901314,
+      "native_ratio": 1.0,
+      "retained_ratio": 1.0,
+      "native_bias_gradient": 0.29438266158103943,
+      "retained_bias_gradient": 0.29438266158103943,
+      "analytic_bias_gradient": 0.29438266158103943
+    },
+    {
+      "mean": 12.0,
+      "latent": 11.981886863708496,
+      "action": 1.0,
+      "native_ratio": 1.0,
+      "retained_ratio": 1.0,
+      "native_bias_gradient": 59.8440055847168,
+      "retained_bias_gradient": 0.2943763732910156,
+      "analytic_bias_gradient": 0.29437634348869324
+    }
+  ]
+}

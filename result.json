@@ -17,7 +17,7 @@
       "retained_ratio": 1.0,
       "native_loss_mean_gradient": -3.134629011154175,
       "retained_loss_mean_gradient": -3.134629249572754,
-      "analytic_loss_mean_gradient": -3.134629249572754
+      "analytic_loss_mean_gradient": -3.1346291807422464
     },
     {
       "mean": 12.0,
@@ -28,7 +28,7 @@
       "retained_ratio": 1.0,
       "native_loss_mean_gradient": 14.728875160217285,
       "retained_loss_mean_gradient": -3.1346309185028076,
-      "analytic_loss_mean_gradient": -3.1346309185028076
+      "analytic_loss_mean_gradient": -3.1346308496655357
     }
   ]
 }

@@ -1,170 +1,95 @@
-# Draft: [Bug] gSDE+tanh action reconstruction can reverse PPO replay gradients despite a unit initial ratio
-
-Status: prepared for author review; not submitted. No maintainer endorsement.
-
 ## Bug
 
 With `use_sde=True` and `squash_output=True`, float32 tanh saturation can make
-`StateDependentNoiseDistribution.log_prob(action)` evaluate the Gaussian density
-at a reconstructed latent different from the sample that produced the action.
-In the example below, the PPO surrogate mean gradient reverses sign relative to
-the retained-sample reference, even though both routes have initial ratio 1.
+gSDE likelihood evaluation score a different Gaussian sample from the one that
+produced the action. A small example gives opposite PPO surrogate mean gradients
+for reconstruction and retained-sample evaluation, although both initial ratios
+are one.
 
-The native collection and replay likelihoods are mutually consistent at the
-reconstructed sample. The discrepancy is relative to the original sampled latent;
-this report is not claiming that native rollout and replay log probabilities
-necessarily disagree before an update.
+This is a deliberately saturated correctness example, not a training-crash
+report. It uses unmodified SB3 at commit
+`7cfb4dd6055e74b5caa4ed4d6777492209946e26` (2.9.2a0).
 
 ## To reproduce
 
-No custom environment, training run, checkpoint, or research fork is required.
-The mean is deliberately set to 12 to expose saturation; this is a deterministic
-correctness example, not evidence of typical training prevalence.
-
-Create an empty directory, save the code below there as `reproduce.py`, then run:
+The [reproducer repository](https://github.com/Ibrahimkhan4real/sb3-tanh-replay-repro)
+contains [the distribution example](https://github.com/Ibrahimkhan4real/sb3-tanh-replay-repro/blob/main/reproduce.py)
+and [a native policy check](https://github.com/Ibrahimkhan4real/sb3-tanh-replay-repro/blob/main/check_policy.py).
+On Linux with Python 3.12:
 
 ```bash
+git clone https://github.com/Ibrahimkhan4real/sb3-tanh-replay-repro.git
+cd sb3-tanh-replay-repro
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.txt
 git clone https://github.com/DLR-RM/stable-baselines3.git .upstream
 git -C .upstream checkout 7cfb4dd6055e74b5caa4ed4d6777492209946e26
 python -m pip install -e .upstream
+python -m pip check
 python reproduce.py
+python check_policy.py
 ```
 
-Use a virtual environment for dependency installation. Validation used Python
-3.12.2 and PyTorch 2.11.0+cpu. The script checks its import source and clean pin.
+The old likelihoods are collected under `no_grad` and independently reevaluated
+at unchanged weights. Each route uses its own old likelihood. Both scripts
+include an unsaturated control. The distribution example also checks the gradients
+against scalar finite differences and the analytic retained-sample mean gradient.
 
-```python
-"""Deterministic float32 probe of upstream gSDE squashed-action replay."""
-import json
-import math
-from pathlib import Path
-import subprocess
-import sys
+## Relevant output
 
-import torch as th
+For advantage +1 and clip range 0.2:
 
-PIN = "7cfb4dd6055e74b5caa4ed4d6777492209946e26"
-ROOT = Path(__file__).resolve().parent
-UPSTREAM = ROOT / ".upstream"
-assert subprocess.check_output(["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], text=True).strip() == PIN
-assert not subprocess.check_output(["git", "-C", str(UPSTREAM), "status", "--porcelain"], text=True).strip()
-sys.path.insert(0, str(UPSTREAM))
-import stable_baselines3 as sb3
-from stable_baselines3.common.distributions import StateDependentNoiseDistribution
-
-assert Path(sb3.__file__).resolve().is_relative_to(UPSTREAM)
-th.set_num_threads(1)
-
-
-def probe(location):
-    """Compare native and retained-sample PPO gradients at unchanged weights."""
-    th.manual_seed(71)
-    mean = th.tensor([[location]], dtype=th.float32, requires_grad=True)
-    log_std = th.tensor([[math.log(0.5)]], dtype=th.float32)
-    features = th.ones((1, 1), dtype=th.float32)
-    dist = StateDependentNoiseDistribution(1, squash_output=True)
-    dist.sample_weights(log_std)
-    dist.proba_distribution(mean, log_std, features)
-    # Exactly the latent used by upstream sample(), without changing its code.
-    with th.no_grad():
-        latent = mean + dist.get_noise(features)
-        action = dist.sample()
-        assert th.equal(action, th.tanh(latent))
-    native_lp = dist.log_prob(action)
-    # Hold the collected latent fixed. The transform term is parameter independent.
-    retained_lp = (dist.distribution.log_prob(latent)
-                   - dist.bijector.log_prob_correction(latent)).sum(dim=1)
-    # Each route has its OWN rollout denominator. No hybrid ratio is used.
-    native_ratio = (native_lp - native_lp.detach()).exp()
-    retained_ratio = (retained_lp - retained_lp.detach()).exp()
-    # PPO with advantage +1 and clip_range .2, inside the clipping interval.
-    def loss(ratio):
-        return -th.minimum(ratio, ratio.clamp(0.8, 1.2)).mean()
-    native_grad = th.autograd.grad(loss(native_ratio), mean, retain_graph=True)[0].item()
-    retained_grad = th.autograd.grad(loss(retained_ratio), mean)[0].item()
-    analytic_grad = (-(latent - mean.detach()) / dist.distribution.variance.detach()).item()
-    assert math.isclose(retained_grad, analytic_grad, rel_tol=1e-5, abs_tol=1e-5)
-    return dict(mean=location, latent=latent.item(), action=action.item(),
-                reconstructed_latent=dist.bijector.inverse(action).item(),
-                native_ratio=native_ratio.item(), retained_ratio=retained_ratio.item(),
-                native_loss_mean_gradient=native_grad,
-                retained_loss_mean_gradient=retained_grad,
-                analytic_loss_mean_gradient=analytic_grad)
-
-
-if __name__ == "__main__":
-    rows = [probe(0.0), probe(12.0)]
-    assert abs(rows[0]["native_loss_mean_gradient"] - rows[0]["retained_loss_mean_gradient"]) < 1e-5
-    assert rows[1]["action"] == 1.0
-    assert abs(rows[1]["native_loss_mean_gradient"] - rows[1]["retained_loss_mean_gradient"]) > 1
-    assert all(r["native_ratio"] == r["retained_ratio"] == 1 for r in rows)
-    print(json.dumps(dict(upstream_commit=PIN, sb3_version=sb3.__version__,
-                         torch_version=th.__version__, python=sys.version,
-                         dtype="float32", device="cpu", seed=71,
-                         checks="passed", cases=rows), indent=2))
-```
-
-## Observed result
-
-| mean | sampled u | stored action | inverse(action) | native loss mean gradient | retained reference |
+| mean | sampled latent | stored action | reconstructed latent | native loss mean gradient | retained reference |
 |---|---:|---:|---:|---:|---:|
 | 0 | 0.783660 | 0.654803 | 0.783660 | -3.134629 | -3.134629 |
 | 12 | 12.783661 | 1.0 | 8.317766 | +14.728875 | -3.134631 |
 
-Both ratios are exactly 1. Each route uses its own old likelihood. The retained
-result matches the analytic gradient `-(u-mean)/variance`. The control agrees
-within 1e-5. No exception or NaN is expected in this small example.
+Both ratios equal one. The retained result matches `-(u - mean) / variance`.
+No NaN or exception is expected in this example.
 
-## Expected behavior and proposed direction
+The second script obtains the old native likelihood from
+`ActorCriticPolicy.forward` and the new one from `evaluate_actions` on a PPO
+policy with a deliberately constant mean head. At mean 12, the native bias
+gradient is 59.8440 versus 0.294376 for the retained reference and analytic result.
+The unsaturated control agrees. This uses built-in Pendulum-v1 for its spaces;
+it does not run the rollout buffer, `PPO.train()`, or a custom environment.
 
-For the sampled-latent PPO objective, score the same retained pre-tanh sample
-throughout collection and optimisation. Changing inverse-tanh epsilon cannot
-recover information lost from the bounded action. A unit-ratio check alone does
-not test this gradient property.
+## Expected behavior / design question
 
-Would maintainers consider retaining the original gSDE sample through the rollout
-buffer and exposing it to update-time likelihood evaluation? I would appreciate
-feedback on the preferred buffer/policy API before proposing implementation.
-The numerator and denominator must both use the retained representation.
+For the sampled-latent PPO objective, the update should score the same pre-tanh
+sample that was collected. The native old and new likelihoods are consistent at
+the reconstructed sample; the discrepancy is relative to the original sample.
+A unit initial ratio therefore does not detect this difference.
 
-This reference does not model probability mass over rounded action cells, does
-not change sampling, and does not establish a universal stability or return gain.
-The proposed contribution would be limited to replay correctness; research
-interventions and hyperparameter changes would remain separate.
+Would you consider retaining the sampled latent through collection and replay?
+Which buffer/policy interface would you prefer? Both numerator and denominator
+would need to use the retained representation. No patch is proposed yet.
 
-Related context: #1593 reports PPO+gSDE NaNs, but this script does not establish
-that its reported failures share this cause. #2249 changes non-gSDE Gaussian
-means and appears to address a different concern.
+These checks do not establish natural exposure frequency, a general stability
+guarantee, or a return improvement. The reference is not a rounded-action-cell
+mass objective. Existing issue #1593 is related NaN context, but the example does
+not establish the cause of that report. PR #2249 addresses a different mean-bound
+change.
 
 ## System info
 
-Imported SB3 source: pinned upstream checkout, not a patched installed package.
+Validated in a fresh venv with no system site-packages: Linux x86_64, Python
+3.12.2, PyTorch 2.11.0+cpu, NumPy 1.26.4, Gymnasium 1.2.0, Cloudpickle 3.1.0,
+SB3 2.9.2a0 installed editable from the clean pinned checkout. No GPU or OpenAI
+Gym was used. Full versions and captured outputs are in the repository.
 
-```text
-- OS: Linux-6.8.0-134-generic-x86_64-with-glibc2.39 # 134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:43:11 UTC 2026
-- Python: 3.12.2
-- Stable-Baselines3: 2.9.2a0
-- PyTorch: 2.11.0+cpu
-- GPU Enabled: False
-- Numpy: 1.26.4
-- Cloudpickle: 3.1.0
-- Gymnasium: 1.2.0
-- OpenAI Gym: 0.26.2
+## Checklist and assistance disclosure
 
-```
+The checks below were performed with OpenAI Codex. Codex generated the scripts
+and this report, inspected the relevant upstream code/documentation, and ran the
+validation. The repository owner authorized publication. No independent human
+re-execution or maintainer approval is claimed. This is a request for discussion,
+not a fully generated PR.
 
-## AI assistance disclosure
-
-OpenAI Codex generated the reproducer and this draft and ran it against the
-unmodified upstream checkout. This draft requires the author's technical review
-before submission. No fully generated PR is being proposed, and no maintainer
-has initiated or approved a patch.
-
-## Author checklist before submission
-
-- [ ] Personally review and rerun the reproducer; verify the reference and scope.
-- [ ] Recheck related issues and read the relevant SB3 documentation.
-- [ ] Complete the upstream issue form truthfully, including assistant disclosure.
-
-The executable example uses no custom Gym environment and the code is included
-above. Leave unchecked requirements that the author has not yet completed.
+- [x] This report does not concern a custom Gym environment.
+- [x] Searched related issues; no matching retained-latent repair was found. Related reports are identified above.
+- [x] Reviewed the relevant PPO documentation, contribution guide, and implementation.
+- [x] Provided executable examples verified against the pinned upstream source.
+- [x] Used fenced code blocks for reproduction commands.

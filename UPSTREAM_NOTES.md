@@ -37,7 +37,8 @@ Source: https://github.com/DLR-RM/stable-baselines3/blob/7cfb4dd6055e74b5caa4ed4
 
 The upstream guide requires an issue before a PR and public disclosure of code
 assistant use. It explicitly excludes fully LLM-generated PRs unless initiated
-by a maintainer. Human review is required before publishing this generated draft;
-do not describe it as independently human-authored. No maintainer approval exists.
+by a maintainer. Assistant generation and validation are disclosed in the report; publication is
+authorized by the repository owner. No independent human re-execution or maintainer
+approval is claimed.
 Future PR requirements include regression tests, type/style checks, documentation
-where needed, and a changelog entry. No GitHub posting was performed.
+where needed, and a changelog entry. The published report is a request for design discussion, not a PR.

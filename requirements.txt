@@ -1,0 +1,5 @@
+# CPU PyTorch is installed separately; see README.md.
+torch==2.11.0
+numpy==1.26.4
+gymnasium==1.2.0
+cloudpickle==3.1.0
