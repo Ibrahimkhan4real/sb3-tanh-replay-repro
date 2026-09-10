@@ -1,15 +1,62 @@
-# SB3 gSDE+tanh replay reproducer
+# PPO replay with gSDE and tanh squashing
 
-A float32 correctness example against unmodified Stable-Baselines3. Under
-saturation, reconstructing the Gaussian sample from a bounded action can change
-the PPO surrogate gradient, even when the initial likelihood ratio is one.
+This example comes from my investigation into numerical instability in PPO with
+gSDE. It isolates a problem in how SB3 evaluates actions after tanh squashing.
 
-Upstream discussion: [SB3 issue #2285](https://github.com/DLR-RM/stable-baselines3/issues/2285).
+The idea is simple: PPO samples a Gaussian value, applies `tanh`, and stores the
+bounded action. During an update, SB3 reconstructs the Gaussian value from that
+action. In float32, tanh can round to exactly 1 or -1, so the original value is
+lost. The reconstructed value can then give a different gradient, even when the
+old and new likelihoods give a ratio of exactly one.
 
-## Run
+The example runs against unmodified SB3. The proposed fix is to keep the original
+sample and use it when evaluating the action during an update. I have raised
+this in [SB3 issue #2285](https://github.com/DLR-RM/stable-baselines3/issues/2285).
 
-Tested on Linux x86_64 with Python 3.12.2 and CPU-only PyTorch 2.11.0. From a
-fresh clone of this repository:
+## What the example shows
+
+In the saturated case below, the sampled value is **12.783661**. Tanh rounds it to
+**1.0**, and SB3's inverse returns **8.317766**. That changes the loss gradient
+from **-3.134631** to **+14.728875**: it points in the opposite direction.
+
+| Case | Original sample | Stored action | Reconstructed sample | SB3 loss gradient | Gradient using original sample |
+|---|---:|---:|---:|---:|---:|
+| Unsaturated, mean 0 | 0.783660 | 0.654803 | 0.783660 | -3.134629 | -3.134629 |
+| Saturated, mean 12 | 12.783661 | 1.0 | 8.317766 | +14.728875 | -3.134631 |
+
+Both initial ratios are exactly one. The unsaturated case gives the same gradient
+to numerical precision, which provides a control for the comparison.
+
+[reproduce.py](reproduce.py) samples an action using SB3's gSDE distribution,
+records the old likelihoods, and evaluates them again with the parameters
+unchanged. Each version uses its own old likelihood. The loss is PPO's clipped
+surrogate with advantage +1 and clip range 0.2; the gradients above are with
+respect to the Gaussian mean.
+
+The gradient using the original sample agrees with the analytic expression
+`-(u - mean) / variance`. The script also checks both gradients using finite
+differences. The full output is in [result.json](result.json).
+
+## Checking the policy methods
+
+[check_policy.py](check_policy.py) checks the same problem through SB3's policy
+methods. It creates a PPO policy with gSDE and squashing, sets its mean to a
+constant, and uses the built-in Pendulum-v1 environment for the observation and
+action spaces. It gets the old likelihood from `ActorCriticPolicy.forward` and
+then calls `evaluate_actions` separately.
+
+At mean 12, the gradient of the mean-head bias is **59.8440** with reconstruction
+and **0.294376** with the original sample. The latter agrees with the analytic
+calculation. Both ratios are one, and the mean-zero control agrees across both
+methods. See [policy_result.json](policy_result.json) for the output.
+
+This check covers the policy methods; it does not run the rollout buffer or
+`PPO.train()`.
+
+## Run it
+
+The setup below was tested in a fresh environment on Linux x86_64, using Python
+3.12.2 and CPU-only PyTorch 2.11.0. From a clone of this repository:
 
 ```bash
 python3 -m venv .venv
@@ -24,65 +71,40 @@ python reproduce.py
 python check_policy.py
 ```
 
-Skip cloning `.upstream` if it already exists at the indicated revision. The
-scripts require Git, verify the clean upstream checkout and import location, and
-never patch SB3 or run training. They use assertions, so run without Python's
-`-O` flag. Each finishes in a few seconds after dependencies are installed.
+If `.upstream` already exists at this revision, skip the clone. Both scripts check
+that they are importing the pinned, unmodified checkout. They require Git and use
+assertions, so run Python without `-O`. Each takes a few seconds once the
+dependencies are installed.
 
-Direct dependencies are pinned in `requirements.txt`; `environment.json` records
-all resolved package versions. `system_info.txt` describes the isolated validation
-environment. The documented installation was tested without access to the host's
-site-packages. GPU and other operating systems have not been validated.
+[requirements.txt](requirements.txt) pins the direct dependencies.
+[environment.json](environment.json) records the full package list, and
+[system_info.txt](system_info.txt) records the test environment. The installation
+was tested without access to the host's Python packages. GPU execution and other
+operating systems have not been tested.
 
-## Distribution example
+## What this does and does not establish
 
-`reproduce.py` obtains an action from native gSDE sampling, collects the old
-likelihoods under `no_grad`, and separately reevaluates each fixed sample.
-Each route uses its own old likelihood, so no hybrid denominator is involved.
+The mean of 12 is chosen deliberately to expose saturation. The examples show
+that reconstructing the sample can change the PPO gradient. They do not tell us
+how often this happens during training, reproduce a training crash, or establish
+that retaining samples improves return or prevents every numerical failure.
 
-| Case | sampled latent | stored action | reconstructed latent | native loss gradient | retained loss gradient |
-|---|---:|---:|---:|---:|---:|
-| Unsaturated, mean 0 | 0.783660 | 0.654803 | 0.783660 | -3.134629 | -3.134629 |
-| Saturated, mean 12 | 12.783661 | 1.0 | 8.317766 | +14.728875 | -3.134631 |
+The reference evaluates the original Gaussian sample. It is not a calculation of
+probability mass over the rounded action's floating-point cell. Both versions use
+SB3's existing Jacobian correction.
 
-Both initial ratios are exactly one. Gradients are with respect to the Gaussian
-mean for a PPO clipped surrogate with advantage +1 and clip range 0.2.
-The retained gradient matches `-(u - mean) / variance`. Independent scalar finite
-differences check both native and retained gradients. Saved output: `result.json`.
+The next question is how to retain samples through rollout collection and policy
+updates without breaking existing interfaces. No patch is included here.
+[UPSTREAM_NOTES.md](UPSTREAM_NOTES.md) lists the relevant code and compatibility
+questions; [ISSUE_DRAFT.md](ISSUE_DRAFT.md) contains the submitted report.
 
-## Native policy check
+## License and AI assistance
 
-`check_policy.py` creates an upstream PPO policy with gSDE and squashing, using
-Gymnasium's built-in Pendulum-v1 for its observation/action spaces. It deliberately
-sets the mean head to a constant, collects the old native likelihood through
-`ActorCriticPolicy.forward`, then calls `evaluate_actions` independently.
+This repository uses the [MIT license](LICENSE). The SB3 checkout is downloaded
+separately and retains its own license.
 
-At mean 12, the native mean-head bias gradient is **59.8440**, versus **0.294376**
-for the retained reference and analytic calculation. Both ratios are one.
-At mean zero, the gradients agree. Saved output: `policy_result.json`.
-This check exercises policy methods, not the rollout buffer or `PPO.train()`.
-
-## Scope
-
-Mean 12 is deliberately selected to expose float32 saturation. These examples
-establish a gradient discrepancy relative to the original sampled-latent objective.
-They do not establish natural exposure frequency, a training crash, improved
-return, or a universal stability guarantee. The retained reference is not the
-probability mass of a rounded action cell. Both branches use SB3's existing
-Jacobian correction; this repository does not propose a Jacobian change.
-
-The proposed discussion is whether sampled latents should be retained through
-collection and update-time likelihood evaluation. Buffer/API design should be
-agreed with maintainers before a patch. See `ISSUE_DRAFT.md` for the proposed
-report and `UPSTREAM_NOTES.md` for source pointers and compatibility concerns.
-
-## License and assistance
-
-This repository is MIT licensed; see `LICENSE`. The separately downloaded SB3
-checkout retains its own license and is excluded from this repository.
-
-OpenAI Codex generated the scripts and report and executed the checks. Publication
-was authorized by the repository owner. This is not a claim of independent human
-re-execution or maintainer approval. SB3 requires public disclosure of assistant
-use and does not accept fully LLM-generated PRs unless initiated by a maintainer.
-No upstream implementation patch is included.
+OpenAI Codex generated the scripts and report and ran the checks. I authorized
+publication, and this assistance is disclosed in the upstream issue. SB3's
+contribution rules
+require disclosure and do not accept fully LLM-generated PRs unless initiated by
+a maintainer.
