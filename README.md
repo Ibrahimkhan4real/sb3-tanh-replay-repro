@@ -102,9 +102,3 @@ questions; [ISSUE_DRAFT.md](ISSUE_DRAFT.md) contains the submitted report.
 
 This repository uses the [MIT license](LICENSE). The SB3 checkout is downloaded
 separately and retains its own license.
-
-OpenAI Codex generated the scripts and report and ran the checks. I authorized
-publication, and this assistance is disclosed in the upstream issue. SB3's
-contribution rules
-require disclosure and do not accept fully LLM-generated PRs unless initiated by
-a maintainer.
