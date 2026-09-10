@@ -4,6 +4,8 @@ A float32 correctness example against unmodified Stable-Baselines3. Under
 saturation, reconstructing the Gaussian sample from a bounded action can change
 the PPO surrogate gradient, even when the initial likelihood ratio is one.
 
+Upstream discussion: [SB3 issue #2285](https://github.com/DLR-RM/stable-baselines3/issues/2285).
+
 ## Run
 
 Tested on Linux x86_64 with Python 3.12.2 and CPU-only PyTorch 2.11.0. From a
